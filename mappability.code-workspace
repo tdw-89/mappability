@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "../mappability"
+		},
+		{
+			"path": "../ont-methylation-qc"
+		},
+		{
+			"path": "../ont-methylation-nf"
+		},
+		{
+			"path": "../UniMap.jl"
+		}
+	],
+	"settings": {}
+}
