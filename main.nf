@@ -149,6 +149,17 @@ def bowtie2IndexFiles(String prefix) {
           "(expected ${prefix}.{1,2,3,4,rev.1,rev.2}.bt2 or .bt2l)"
 }
 
+/*
+ * Whether tasks run in their containers. workflow.containerEngine is set only
+ * when docker/apptainer/... is enabled in the config, but the cloud batch
+ * executors always run each task in its container -- Seqera's AWS Batch
+ * environments set process.executor = 'awsbatch' and no engine.
+ */
+def runsInContainers() {
+    def executor = workflow.session.config.navigate('process.executor')?.toString()
+    return workflow.containerEngine || executor in ['awsbatch', 'google-batch', 'azurebatch', 'k8s']
+}
+
 def validateParams() {
     // A bare `--read_lengths` (no value) arrives as true.
     def missing = ['fasta', 'gff', 'read_lengths', 'fragment_lengths']
@@ -199,12 +210,12 @@ def validateParams() {
     if ('aws' in workflow.profile.tokenize(',') && !params.aws_queue) {
         error "-profile aws needs --aws_queue (under Seqera use -profile seqera instead)"
     }
-    if (!workflow.containerEngine && !params.unimap_project) {
+    if (!runsInContainers() && !params.unimap_project) {
         error "no container engine is enabled, so UniMap must come from a local checkout: " +
               "pass --unimap_project <UniMap.jl dir> (or export UNIMAP_PROJECT), or use " +
               "-profile docker / apptainer"
     }
-    if (params.unimap_project && !workflow.containerEngine &&
+    if (params.unimap_project && !runsInContainers() &&
             !file("${params.unimap_project}/Project.toml").exists()) {
         error "--unimap_project ${params.unimap_project} is not a Julia project (no Project.toml)"
     }

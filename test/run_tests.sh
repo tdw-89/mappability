@@ -271,6 +271,11 @@ out=$(nf_launch --bowtie2_index /nonexistent/idx -stub-run)
 assert_contains "incomplete --bowtie2_index is refused" "no complete bowtie2 index" "${out}"
 out=$(cd "${WORK}" && nextflow run "${ROOT}" -profile test -ansi-log false -stub-run 2>&1)
 assert_contains "no container and no --unimap_project is refused" "--unimap_project" "${out}"
+# A cloud batch executor runs every task in its container even with no engine
+# enabled -- how Seqera's AWS Batch environments are configured.
+printf 'process.executor = "awsbatch"\n' > "${WORK}/awsbatch.config"
+out=$(cd "${WORK}" && nextflow run "${ROOT}" -profile test -c "${WORK}/awsbatch.config" -ansi-log false -preview 2>&1)
+if [[ "${out}" != *"--unimap_project"* ]]; then ok "awsbatch with no container engine is accepted"; else bad "awsbatch with no container engine is accepted"; printf '%s\n' "${out}" | tail -5; fi
 # Under Fusion the work dir is S3; the two tasks that write throwaway files
 # must run in local scratch, without losing the profile's resource blocks.
 out=$(nextflow config "${ROOT}" -profile seqera -flat 2>&1)
