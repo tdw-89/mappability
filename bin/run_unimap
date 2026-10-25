@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+#
+# run_unimap <subcommand> [args...]
+#
+# The UniMap CLI, from whichever project the environment points at:
+#   UNIMAP_PROJECT  UniMap.jl project directory. Set by the container image
+#                   (/opt/UniMap.jl), or exported by the task from
+#                   --unimap_project when running without containers.
+#   UNIMAP_THREADS  julia threads (the task's cpus); default 1. No interactive
+#                   thread (",0"): a batch CLI has no use for one.
+
+set -euo pipefail
+
+if [[ -z "${UNIMAP_PROJECT:-}" ]]; then
+    echo "error: no UniMap.jl project. Without a container, pass --unimap_project" >&2
+    echo "       (or export UNIMAP_PROJECT) pointing at a UniMap.jl checkout." >&2
+    exit 2
+fi
+if [[ ! -f "${UNIMAP_PROJECT}/Project.toml" ]]; then
+    echo "error: ${UNIMAP_PROJECT} is not a Julia project (no Project.toml)" >&2
+    exit 2
+fi
+
+exec julia --startup-file=no -t "${UNIMAP_THREADS:-1},0" --project="${UNIMAP_PROJECT}" -m UniMap "$@"

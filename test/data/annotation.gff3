@@ -1,0 +1,32 @@
+##gff-version 3
+##sequence-region chr1 1 60000
+##sequence-region chr2 1 40000
+##sequence-region chr3 1 20000
+chr1	Test	gene	10500	12500	.	+	.	ID=gene-dupA;Name=dupa;gene_biotype=protein_coding
+chr1	Test	mRNA	10500	12500	.	+	.	ID=rna-dupA.1;Parent=gene-dupA;Name=dupA.1;gene=dupa
+chr1	Test	exon	10500	11000	.	+	.	ID=exon-dupA.1-1;Parent=rna-dupA.1
+chr1	Test	exon	12000	12500	.	+	.	ID=exon-dupA.1-2;Parent=rna-dupA.1
+chr1	Test	gene	30001	33000	.	-	.	ID=gene-uniqB;Name=shared;gene_biotype=protein_coding
+chr1	Test	mRNA	30001	33000	.	-	.	ID=rna-uniqB.1;Parent=gene-uniqB;Name=uniqB.1;gene=shared
+chr1	Test	exon	30001	31000	.	-	.	ID=exon-uniqB.1-1;Parent=rna-uniqB.1
+chr1	Test	exon	32000	33000	.	-	.	ID=exon-uniqB.1-2;Parent=rna-uniqB.1
+chr1	Test	gene	34001	35000	.	+	.	ID=gene-nearC;Name=nearc;gene_biotype=protein_coding
+chr1	Test	mRNA	34001	35000	.	+	.	ID=rna-nearC.1;Parent=gene-nearC;Name=nearC.1;gene=nearc
+chr1	Test	exon	34001	35000	.	+	.	ID=exon-nearC.1-1;Parent=rna-nearC.1
+chr1	Test	gene	201	1200	.	+	.	ID=gene-edgeD;Name=edged;gene_biotype=protein_coding
+chr1	Test	mRNA	201	1200	.	+	.	ID=rna-edgeD.1;Parent=gene-edgeD;Name=edgeD.1;gene=edged
+chr1	Test	exon	201	1200	.	+	.	ID=exon-edgeD.1-1;Parent=rna-edgeD.1
+chr1	Test	gene	45001	46000	.	+	.	ID=gene-pseudo1;Name=pseudo1;gene_biotype=pseudogene
+chr2	Test	gene	5001	7000	.	-	.	ID=gene-revE;Name=reve;gene_biotype=protein_coding
+chr2	Test	mRNA	5001	7000	.	-	.	ID=rna-revE.1;Parent=gene-revE;Name=revE.1;gene=reve
+chr2	Test	exon	5001	5600	.	-	.	ID=exon-revE.1-1;Parent=rna-revE.1
+chr2	Test	exon	6400	7000	.	-	.	ID=exon-revE.1-2;Parent=rna-revE.1
+chr2	Test	gene	30001	31000	.	+	.	ID=rna-lnc1;Name=lnc1;gene_biotype=lncRNA
+chr2	Test	lnc_RNA	30001	31000	.	+	.	ID=rna-lnc1.1;Parent=rna-lnc1;Name=lnc1.1;gene=lnc1
+chr2	Test	exon	30001	31000	.	+	.	ID=exon-lnc1.1-1;Parent=rna-lnc1.1
+chr3	Test	gene	4501	6500	.	+	.	ID=gene-nblkF;Name=nblkf;gene_biotype=protein_coding
+chr3	Test	mRNA	4501	6500	.	+	.	ID=rna-nblkF.1;Parent=gene-nblkF;Name=nblkF.1;gene=nblkf
+chr3	Test	exon	4501	6500	.	+	.	ID=exon-nblkF.1-1;Parent=rna-nblkF.1
+chr3	Test	gene	15001	17000	.	-	.	ID=gene-sameG;Name=shared;gene_biotype=protein_coding
+chr3	Test	mRNA	15001	17000	.	-	.	ID=rna-sameG.1;Parent=gene-sameG;Name=sameG.1;gene=shared
+chr3	Test	exon	15001	17000	.	-	.	ID=exon-sameG.1-1;Parent=rna-sameG.1
