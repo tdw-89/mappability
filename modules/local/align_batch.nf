@@ -14,8 +14,11 @@
  *
  * Shards are independent: bowtie2 places each pair on its own, with the
  * tie-breaking PRNG seeded from the read's name, sequence and quality, so
- * splitting the reads changes nothing about any alignment. The CAT_AND_SCORE
- * equivalence test (test/run_tests.sh) checks exactly that.
+ * splitting the reads changes nothing about any alignment. The sharded-vs-
+ * monolithic equivalence test (test/run_tests.sh --e2e) checks exactly that.
+ *
+ * The shard is named sim_L{L}_{batch}.bam, the form `unimap score` reads as
+ * shards of read length L without concatenating them.
  */
 
 process ALIGN_BATCH {
@@ -25,6 +28,9 @@ process ALIGN_BATCH {
 
     publishDir "${params.outdir}/alignment/logs", mode: params.publish_mode,
                pattern: "*.bowtie2.log"
+    // ~110 GB across all shards at genome scale; only needed to re-score.
+    publishDir "${params.outdir}/alignment/bams", mode: params.publish_mode,
+               pattern: "*.bam", enabled: params.publish_bams as boolean
 
     input:
     tuple val(L), val(batch), path(r1), path(r2), val(n_pairs)
@@ -33,12 +39,12 @@ process ALIGN_BATCH {
     val  aligner_args
 
     output:
-    path "shard_L${L}_${batch}.bam",          emit: bam
-    path "shard_L${L}_${batch}.bowtie2.log",  emit: log
+    path "sim_L${L}_${batch}.bam",          emit: bam
+    path "sim_L${L}_${batch}.bowtie2.log",  emit: log
     path "bowtie2_version.txt",               emit: version
 
     script:
-    def prefix = "shard_L${L}_${batch}"
+    def prefix = "sim_L${L}_${batch}"
     """
     bowtie2 --version > bowtie2_version.txt
 
@@ -65,7 +71,7 @@ process ALIGN_BATCH {
 
     stub:
     """
-    touch "shard_L${L}_${batch}.bam" "shard_L${L}_${batch}.bowtie2.log"
+    touch "sim_L${L}_${batch}.bam" "sim_L${L}_${batch}.bowtie2.log"
     echo "bowtie2 stub" > bowtie2_version.txt
     """
 }

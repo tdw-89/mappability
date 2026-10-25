@@ -20,7 +20,7 @@
 
 set -uo pipefail
 
-CONTAINER_UNIMAP="${CONTAINER_UNIMAP:-ghcr.io/tdw-89/unimap:0.1.0}"
+CONTAINER_UNIMAP="${CONTAINER_UNIMAP:-ghcr.io/tdw-89/unimap:0.2.0}"
 CONTAINER_BOWTIE2="${CONTAINER_BOWTIE2:-quay.io/biocontainers/mulled-v2-ac74a7f02cebcfcc07d8e8d1d750af9c83b4d45a:f70b31a2db15c023d641c32f433fb02cd04df5a6-0}"
 
 RUNTIME=""
@@ -71,7 +71,7 @@ fi
 check "UNIMAP_PROJECT is set and is a project" "${CONTAINER_UNIMAP}" '[ -f "$UNIMAP_PROJECT/Project.toml" ]'
 check "unimap subcommands present"             "${CONTAINER_UNIMAP}" \
       'cd /tmp && julia --project="$UNIMAP_PROJECT" -m UniMap score --help | grep -q -- --fasta'
-check "samtools cat / faidx"                   "${CONTAINER_UNIMAP}" 'samtools cat 2>&1 | grep -q Usage; samtools faidx 2>&1 | grep -q Usage'
+check "samtools faidx"                         "${CONTAINER_UNIMAP}" 'samtools faidx 2>&1 | grep -q Usage'
 check "awk, gzip, tar, xargs, cmp, git"        "${CONTAINER_UNIMAP}" 'for t in awk gzip tar xargs cmp git sort; do command -v $t > /dev/null || exit 1; done'
 check "env -S shebang for check_score.jl"      "${CONTAINER_UNIMAP}" 'env -S true'
 check "ps for Nextflow task metrics"           "${CONTAINER_UNIMAP}" 'command -v ps'

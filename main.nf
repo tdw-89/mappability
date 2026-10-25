@@ -19,12 +19,12 @@
  *    ALIGN_BATCH x (n_batches x read lengths)       |
  *        |    bowtie2 -> unsorted shard BAM         |
  *        |                                          |
- *    CAT_AND_SCORE  <-------------------------------+
- *             samtools cat per L -> unimap score -> tar mappability.zarr
+ *    SCORE  <---------------------------------------+
+ *             unimap score over the shards (in parallel) -> tar mappability.zarr
  *
  * Nearly all the compute is bowtie2, and sharding it is exact: each pair is
- * aligned independently and carries its origin in its read name, so the shards
- * concatenated in any order score identically to one monolithic alignment.
+ * aligned independently and carries its origin in its read name, so the shards,
+ * in any order, score identically to one monolithic alignment.
  * What must never happen is sorting or filtering the BAMs -- `unimap score`
  * needs every pair, mates adjacent. See modules/local/ for the details of each
  * step and the checks that guard it.
@@ -37,7 +37,7 @@ include { BOWTIE2_BUILD      } from './modules/local/bowtie2_build'
 include { BUILD_LOCI         } from './modules/local/build_loci'
 include { SIMULATE_AND_BATCH } from './modules/local/simulate_and_batch'
 include { ALIGN_BATCH        } from './modules/local/align_batch'
-include { CAT_AND_SCORE      } from './modules/local/cat_and_score'
+include { SCORE              } from './modules/local/score'
 
 // ---------------------------------------------------------------------------
 
@@ -83,7 +83,7 @@ def helpMessage() {
 
     Output
       --tar_zarr          publish mappability.zarr as one tar   [${params.tar_zarr}]
-      --publish_bams      also publish the per-L BAMs (large)   [${params.publish_bams}]
+      --publish_bams      also publish the shard BAMs (large)   [${params.publish_bams}]
 
     Software
       --unimap_project    UniMap.jl checkout, when running without containers
@@ -253,7 +253,7 @@ workflow {
 
     ALIGN_BATCH(batches, index_ch, index_name, aligner_args)
 
-    CAT_AND_SCORE(
+    SCORE(
         SIMULATE_AND_BATCH.out.meta,
         SIMULATE_AND_BATCH.out.manifest,
         ALIGN_BATCH.out.bam.collect(),

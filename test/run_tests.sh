@@ -175,7 +175,7 @@ assert_contains "incomplete --bowtie2_index is refused" "no complete bowtie2 ind
 out=$(cd "${WORK}" && nextflow run "${ROOT}" -profile test -ansi-log false -stub-run 2>&1)
 assert_contains "no container and no --unimap_project is refused" "--unimap_project" "${out}"
 out=$(nf_launch -stub-run --outdir "${WORK}/stub")
-assert_contains "stub run wires every process" "CAT_AND_SCORE" "${out}"
+assert_contains "stub run wires every process" "> SCORE" "${out}"
 if [[ "${out}" == *"Done in"* ]]; then ok "stub run completes"; else bad "stub run completes"; printf '%s\n' "${out}" | tail -20; fi
 
 # ---------------------------------------------------------------------------

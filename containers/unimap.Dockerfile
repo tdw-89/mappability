@@ -1,5 +1,5 @@
-# UniMap.jl + samtools: the image for BUILD_LOCI, SIMULATE_AND_BATCH and
-# CAT_AND_SCORE. ALIGN_BATCH uses a stock bowtie2+samtools biocontainer instead.
+# UniMap.jl + samtools: the image for BUILD_LOCI, SIMULATE_AND_BATCH, SCORE and
+# SAMTOOLS_FAIDX. ALIGN_BATCH uses a stock bowtie2+samtools biocontainer instead.
 #
 # Published as ghcr.io/tdw-89/unimap (params.container_unimap). GHCR serves
 # Docker on AWS Batch and Apptainer on Unity from the same URL.
@@ -9,7 +9,7 @@
 #
 #   docker buildx build --platform linux/amd64 \
 #       -f containers/unimap.Dockerfile \
-#       -t ghcr.io/tdw-89/unimap:0.1.0 --push .
+#       -t ghcr.io/tdw-89/unimap:0.2.0 --push .
 #
 # UNIMAP_REF pins the UniMap.jl commit. Bump it and the tag together. The
 # commit is recorded in simulate.toml / score.toml through `git rev-parse`,
@@ -22,7 +22,7 @@
 FROM julia:1.13.2-trixie
 
 ARG UNIMAP_REPO=https://github.com/tdw-89/UniMap.jl.git
-ARG UNIMAP_REF=8db600aa3358190e93623fac3771477191338a60
+ARG UNIMAP_REF=3959a74949459dff0236a29b6f387e31730420f2
 
 # procps: Nextflow reads task metrics with ps.
 RUN apt-get update \

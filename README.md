@@ -16,14 +16,15 @@ GFF + FASTA
  ALIGN_BATCH × (n_batches × read lengths)     │                 bowtie2 | samtools view
      │   unsorted, unfiltered shard BAMs      │
      │                                        │
- CAT_AND_SCORE ◄──────────────────────────────┘                 samtools cat; unimap score
-         per-L BAMs -> mappability.zarr(.tar) + Parquet summaries
+ SCORE ◄──────────────────────────────────────┘                 unimap score
+         shards, scanned in parallel -> mappability.zarr(.tar) + Parquet summaries
 ```
 
 Sharding is exact: bowtie2 aligns each pair independently (its tie-breaking PRNG is
 seeded from the read's own name, sequence and quality), and every read name carries the
-region it was simulated from, so the shards concatenated in any order score identically to
-one monolithic run. `test/run_tests.sh --e2e` checks this: every Zarr array and Parquet
+region it was simulated from, so the shards, in any order, score identically to one
+monolithic run. `unimap score` reads the shards directly (`sim_L{L}_{batch}.bam`) and scans
+them in parallel, so they are never concatenated. `test/run_tests.sh --e2e` checks this: every Zarr array and Parquet
 table from the pipeline is compared with UniMap's own `simulate → align-script → score` path.
 What must never happen is sorting or filtering the BAMs: `unimap score` streams them pair by
 pair and needs every pair present with its mates adjacent.
@@ -72,7 +73,7 @@ with a newer default JDK, `export JAVA_HOME=$(/usr/libexec/java_home -v 24)`.
 | `--cutoffs` | `0,2,5,10,20,30` | fragment MAPQ cutoffs |
 | `--frag_mapq` / `--tolerance` | `min` / `0` | passed to `unimap score` |
 | `--tar_zarr` | `true` | publish `mappability.zarr` as one tar (no recompression) |
-| `--publish_bams` | `false` | also publish the per-L BAMs (~110 GB at genome scale) |
+| `--publish_bams` | `false` | also publish the shard BAMs (~110 GB at genome scale) |
 | `--outdir` | `results` | local path or `s3://` URI |
 | `--unimap_project` | `$UNIMAP_PROJECT` | UniMap.jl checkout; only without containers |
 | `--julia_threads` | task cpus | set `1` only to run the amd64 image under emulation (Apple Silicon), where multithreaded Julia segfaults |
@@ -88,11 +89,11 @@ results/
   loci/          gene_ids.txt, loci.tsv
   simulation/    simulate.toml, loci.tsv, loci.bed, regions.tsv, tiling.tsv,
                  batch_plan.tsv (region -> batch), batches.tsv (pairs per batch)
-  alignment/logs/shard_L{L}_{batch}.bowtie2.log
+  alignment/logs/sim_L{L}_{batch}.bowtie2.log
+  alignment/bams/sim_L{L}_{batch}.bam                (--publish_bams only)
   scores/        mappability.zarr.tar, misplacement_summary.parquet,
                  bleed_matrix.parquet, misplaced_sites.parquet,
                  score.toml, align.toml
-  bams/          sim_L{L}.bam                        (--publish_bams only)
   pipeline_info/ timeline, report, trace, DAG
 ```
 
@@ -108,7 +109,7 @@ fragment that failed to map. So the pipeline counts:
 - **BUILD_LOCI** — every selected gene ID became a locus.
 - **SIMULATE_AND_BATCH** — every per-region FASTQ was packed into exactly one batch.
 - **ALIGN_BATCH** — bowtie2's input pair count equals the planner's count for that batch.
-- **CAT_AND_SCORE** — every planned shard arrived; all were aligned by one bowtie2 build;
+- **SCORE** — every planned shard arrived; all were aligned by one bowtie2 build;
   and after scoring, every simulated pair was seen exactly once with both mates
   (`bin/check_score.jl` against `score.toml`).
 
@@ -129,9 +130,8 @@ Select the **`seqera`** profile, not `aws`. Seqera's compute environment supplie
 executor, queue, region, work directory, Wave and Fusion; `seqera` carries only cpus, memory
 and time. Recommended compute environment: Fusion + Wave, Spot, instance families with local
 NVMe (`c6id`, `m6id`, `r6id`). With Fusion, local disk holds only each task's own writes:
-~70 GB for `SIMULATE_AND_BATCH`, ~125 GB for `CAT_AND_SCORE` (per-L BAMs, Zarr, tar), so the
-latter needs ≥ ~200 GB of NVMe (`m6id.xlarge` or larger). Without Fusion every task downloads
-its inputs first, and `CAT_AND_SCORE` needs ~180 GB of EBS — see `conf/aws.config`.
+~70 GB for `SIMULATE_AND_BATCH`, and `SCORE` only ~15 GB (Zarr store and tar; the shards stream from S3). Without Fusion every task
+downloads its inputs first, and `SCORE` needs ~125 GB of EBS — see `conf/aws.config`.
 
 Every input may be an `s3://` URI. `--outdir` on S3 publishes by server-side copy.
 
@@ -145,14 +145,14 @@ holds ~65 GB of batched FASTQ and ~110 GB of shard BAMs.
 
 | Image | Used by | |
 |---|---|---|
-| `ghcr.io/tdw-89/unimap:0.1.0` | loci, simulate, score, faidx | `containers/unimap.Dockerfile`: Julia 1.13.2 + UniMap.jl (pinned commit) precompiled, samtools |
+| `ghcr.io/tdw-89/unimap:0.2.0` | loci, simulate, score, faidx | `containers/unimap.Dockerfile`: Julia 1.13.2 + UniMap.jl (pinned commit) precompiled, samtools |
 | nf-core's `mulled-v2-ac74a7…:f70b31…-0` | bowtie2 build/align | bowtie2 2.5.2, samtools 1.18 |
 
 Build and push the UniMap image (always `linux/amd64` — Unity and Batch are x86_64):
 
 ```sh
 docker buildx build --platform linux/amd64 -f containers/unimap.Dockerfile \
-    -t ghcr.io/tdw-89/unimap:0.1.0 --push .
+    -t ghcr.io/tdw-89/unimap:0.2.0 --push .
 containers/check_containers.sh          # or: sbatch containers/check_containers.sh
 ```
 
@@ -180,5 +180,9 @@ two genes sharing a `Name=`, and a lncRNA and a pseudogene that must not be sele
 
 28,407 genes → 12,256 regions; ~1.38 billion pairs per read length; ~1,000 vCPU-hours of
 bowtie2. The wall time is two serial steps around a parallel one: `SIMULATE_AND_BATCH`
-(~20 min on 32 cores), 80 × `ALIGN_BATCH`, then `CAT_AND_SCORE`, whose `unimap score` threads
-over read lengths only and so runs ~2.5–3 h on two cores whatever the instance.
+(~20 min on 32 cores), 80 × `ALIGN_BATCH`, then `SCORE`. Measured components of `SCORE`,
+extrapolated to genome scale on an Apple M-series laptop: the shard scans and per-region
+tracks take a few minutes on 8 threads; writing the Zarr store takes ~12 min per read length
+and is serial (Zarr.jl's Blosc codec uses global state), so ~25–30 min in all. The store holds
+~600 GB of counts per read length before compression, and copying that into chunks, not the
+compression, is most of the cost.
