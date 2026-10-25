@@ -46,34 +46,43 @@ def helpMessage() {
     mappability ${workflow.manifest.version}
 
       nextflow run . -profile local --unimap_project ../UniMap.jl \\
-          --fasta ref.fna --gff ref.gff --bowtie2_index ref/bowtie2/ref
-      nextflow run . -profile unity  --fasta ... --gff ... --bowtie2_index ...
+          --fasta ref.fna --gff ref.gff3 --bowtie2_index ref/bowtie2/ref \\
+          --read_lengths 50,150 --fragment_lengths 100,200,300,400,500
+      nextflow run . -profile unity  --fasta ... --gff ... --bowtie2_index ... \\
+          --read_lengths ... --fragment_lengths ...
       nextflow run . -profile test,local --unimap_project ../UniMap.jl
 
-    Input
+    Input (required: --fasta, --gff, --read_lengths, --fragment_lengths)
       --fasta             reference FASTA, uncompressed; must be the one the
                           bowtie2 index was built from. A .fai beside it is reused.
-      --gff               GFF3 (or GTF with --genes), optionally .gz
-      --bowtie2_index     bowtie2 index prefix, e.g. ref/bowtie2/GRCz12tu. Omit
-                          to build one from --fasta (small genomes only).
+      --gff               GFF3 (or GTF with --genes), optionally .gz; any source
+                          (NCBI, Ensembl, GENCODE, ...) naming the same sequences
+                          as the FASTA
+      --bowtie2_index     bowtie2 index prefix, e.g. ref/bowtie2/ref. Omit to
+                          build one from --fasta (small genomes only).
       --outdir            results directory                     [${params.outdir}]
 
     Loci
-      --gene_biotype      take every GFF3 gene with this gene_biotype
-                                                                [${params.gene_biotype}]
+      --gene_biotype      take every GFF3 gene of this biotype (comma-separate
+                          several)                              [${params.gene_biotype}]
+      --biotype_attribute attribute holding it; auto = gene_biotype, biotype or
+                          gene_type, else genes with a CDS      [${params.biotype_attribute}]
       --genes             or a file of IDs, one per line        [${params.genes ?: 'none'}]
       --upstream          flank upstream of the TSS (bp)        [${params.upstream}]
       --downstream        flank downstream of the TES (bp)      [${params.downstream}]
 
     Simulation grid
-      --read_lengths      [${params.read_lengths}]
-      --fragment_lengths  [${params.fragment_lengths}]
+      --read_lengths      comma-separated read lengths          [${params.read_lengths ?: 'required'}]
+      --fragment_lengths  comma-separated fragment lengths      [${params.fragment_lengths ?: 'required'}]
                           bowtie2 -X is set to the largest of these
       --step              bp between fragment starts            [${params.step}]
       --orientation       plus, minus or both                   [${params.orientation}]
 
     Sharding and alignment
-      --n_batches         alignment batches per read length     [${params.n_batches}]
+      --pairs_per_batch   read pairs per alignment task; sets the batch count
+                                                                [${params.pairs_per_batch}]
+      --n_batches         or a fixed number of batches per read length
+                                                                [${params.n_batches ?: 'from pairs_per_batch'}]
       --bowtie2_args      extra bowtie2 arguments               [${params.bowtie2_args ?: 'none'}]
 
     Scoring
@@ -141,7 +150,9 @@ def bowtie2IndexFiles(String prefix) {
 }
 
 def validateParams() {
-    def missing = ['fasta', 'gff'].findAll { !params[it] }
+    // A bare `--read_lengths` (no value) arrives as true.
+    def missing = ['fasta', 'gff', 'read_lengths', 'fragment_lengths']
+        .findAll { !params[it] || params[it] instanceof Boolean }
     if (missing) {
         helpMessage()
         error "missing required parameter(s): ${missing.collect { '--' + it }.join(', ')}"
@@ -174,8 +185,15 @@ def validateParams() {
     if (!(params.frag_mapq in ['min', 'max'])) {
         error "--frag_mapq must be min or max"
     }
-    if (!(params.n_batches.toString() ==~ /\d+/) || !((params.n_batches as int) in 1..999)) {
+    if (params.n_batches != null &&
+            (!(params.n_batches.toString() ==~ /\d+/) || !((params.n_batches as int) in 1..999))) {
         error "--n_batches must be between 1 and 999"
+    }
+    if (!(params.pairs_per_batch.toString() ==~ /[1-9]\d*/)) {
+        error "--pairs_per_batch must be a positive integer"
+    }
+    if (!params.gene_biotype?.toString()?.trim() || !params.biotype_attribute?.toString()?.trim()) {
+        error "--gene_biotype and --biotype_attribute must not be empty"
     }
     checkBowtie2Args(params.bowtie2_args ?: '')
     if ('aws' in workflow.profile.tokenize(',') && !params.aws_queue) {
@@ -214,7 +232,7 @@ workflow {
 
     log.info "mappability ${workflow.manifest.version}: L=${params.read_lengths} " +
              "F=${params.fragment_lengths} step=${params.step} orientation=${params.orientation} " +
-             "batches<=${params.n_batches} bowtie2 ${aligner_args}"
+             "bowtie2 ${aligner_args}"
     if (!index_files) {
         log.warn "no --bowtie2_index: building one from ${fasta.name}. Fine for a test genome; " +
                  "for a large one build it once and pass --bowtie2_index."
@@ -236,6 +254,15 @@ workflow {
         }
         .groupTuple(size: 2)
         .map { key, fq -> [ key, fq.sort { it.name } ] }
+
+    // The plan, once there is one: how big this grid turned out to be.
+    SIMULATE_AND_BATCH.out.manifest.subscribe { f ->
+        def rows = f.splitCsv(sep: '\t', header: true)
+        def per_L = rows.groupBy { it.L }.collectEntries { L, rs -> [L, rs.sum { it.n_pairs as long }] }
+        def n_b = rows.collect { it.batch }.unique().size()
+        log.info "simulated ${per_L.collect { L, n -> "L=${L}: ${String.format('%,d', n)} pairs" }.join(', ')}; " +
+                 "${n_b} batch(es) per read length, ${rows.size()} ALIGN_BATCH task(s)"
+    }
 
     // The pairs each batch's FASTQ must hold, from the batch plan.
     expected = SIMULATE_AND_BATCH.out.manifest

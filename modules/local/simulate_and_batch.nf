@@ -8,6 +8,8 @@
  * task: they are concatenated into batch_L{L}_{batch}_R{1,2}.fq.gz (gzip
  * members concatenate into a valid gzip stream) and deleted as they are
  * consumed, which also keeps peak disk at roughly one copy of the reads.
+ * Under Fusion even the work directory is S3, so conf/fusion_scratch.config runs
+ * this task in local scratch; the `df` line in .command.err shows where.
  *
  * R1 and R2 of a batch are built from the same region list in the same order,
  * so mates stay in step. Which batch a region lands in, and in what order, does
@@ -44,6 +46,10 @@ process SIMULATE_AND_BATCH {
     ${project}
     export UNIMAP_THREADS=${params.julia_threads ?: task.cpus}
 
+    # Where the ~70 GB of FASTQ will land (local scratch, not S3, under Fusion).
+    echo "task dir: \${PWD}" >&2
+    df -h . >&2 || true
+
     run_unimap simulate \\
         -f "${fasta}" \\
         -l "${loci}" \\
@@ -56,16 +62,17 @@ process SIMULATE_AND_BATCH {
     mkdir -p sim_meta batches
     cp sim/simulate.toml sim/loci.tsv sim/loci.bed sim/regions.tsv sim/tiling.tsv sim_meta/
 
-    plan_batches.sh sim/regions.tsv sim/tiling.tsv ${params.n_batches} \\
+    plan_batches.sh sim/regions.tsv sim/tiling.tsv ${params.n_batches ?: 0} ${params.pairs_per_batch} \\
         sim_meta/batch_plan.tsv sim_meta/batches.tsv
 
     for L in ${Ls}; do
         for batch in \$(tail -n +2 sim_meta/batch_plan.tsv | cut -f2 | sort -u); do
             awk -F'\\t' -v b="\${batch}" 'NR > 1 && \$2 == b { print \$1 }' sim_meta/batch_plan.tsv > ids.txt
             for mate in R1 R2; do
-                sed "s|.*|sim/fastq/L\${L}/&_\${mate}.fq.gz|" ids.txt > files.txt
-                xargs cat < files.txt > "batches/batch_L\${L}_\${batch}_\${mate}.fq.gz"
-                xargs rm -f < files.txt
+                # NUL-separated, so no character in a region ID is special to xargs.
+                awk -v d="sim/fastq/L\${L}/" -v m="_\${mate}.fq.gz" '{ print d \$0 m }' ids.txt | tr '\\n' '\\0' > files.txt
+                xargs -0 cat < files.txt > "batches/batch_L\${L}_\${batch}_\${mate}.fq.gz"
+                xargs -0 rm -f < files.txt
             done
         done
     done

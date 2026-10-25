@@ -3,6 +3,8 @@
 Empirical paired-end mappability of a set of loci (by default every protein-coding
 gene) with [UniMap.jl](https://github.com/tdw-89/UniMap.jl), as a Nextflow pipeline that
 shards the bowtie2 step — nearly all of the compute — across many independent tasks.
+It works for any genome: give a FASTA, a GFF3 that names the same sequences, and the read
+and fragment lengths of the libraries the mappability is for.
 
 ```
 GFF + FASTA
@@ -40,16 +42,19 @@ nextflow run . -profile test,docker
 
 # Real data on a workstation -- a handful of genes, not the genome:
 nextflow run . -profile local --unimap_project ../UniMap.jl \
-    --fasta ref_links/GCF_049306965.2_GRCz12tu_genomic.fna \
-    --gff   ref_links/GCF_049306965.2_GRCz12tu_genomic.gff \
-    --bowtie2_index ref_links/bowtie2/GRCz12tu \
+    --fasta ref/genome.fa --gff ref/genes.gff3 --bowtie2_index ref/bowtie2/genome \
+    --read_lengths 50,150 --fragment_lengths 100,150,200,300,400,500 \
     --genes my_genes.txt --n_batches 4
 
-# All 28,407 protein-coding genes on Unity:
+# Every protein-coding gene, on Unity:
 nextflow run . -profile unity \
-    --fasta ... --gff ... --bowtie2_index .../GRCz12tu \
+    --fasta ... --gff ... --bowtie2_index ... \
+    --read_lengths ... --fragment_lengths ... \
     -w /scratch/workspace/$USER-mappability/work --outdir results
 ```
+
+The zebrafish run this was built for (GRCz12tu, NCBI RefSeq annotation, 28,407 genes) used
+`--read_lengths 60,150 --fragment_lengths 50,75,100,125,150,175,200,250,300,350,400,450,500`.
 
 `nextflow run . --help` lists every parameter. Nextflow 25.04 needs Java 17–24; on a Mac
 with a newer default JDK, `export JAVA_HOME=$(/usr/libexec/java_home -v 24)`.
@@ -59,16 +64,18 @@ with a newer default JDK, `export JAVA_HOME=$(/usr/libexec/java_home -v 24)`.
 | Parameter | Default | |
 |---|---|---|
 | `--fasta` | required | uncompressed reference; a `.fai` beside it is reused, otherwise built |
-| `--gff` | required | GFF3 (or GTF with `--genes`), optionally `.gz` |
+| `--gff` | required | GFF3 from any source (or GTF with `--genes`), optionally `.gz` |
+| `--read_lengths` | required | comma-separated, e.g. `50,150` |
+| `--fragment_lengths` | required | comma-separated; every (L, F) is simulated, F < L allowed; bowtie2 `-X` is set to the largest |
 | `--bowtie2_index` | build one | index prefix built from `--fasta`; omit only for small genomes |
-| `--gene_biotype` | `protein_coding` | select every GFF3 `gene` with this `gene_biotype`, by `ID=` |
+| `--gene_biotype` | `protein_coding` | select every GFF3 gene of this biotype (comma-separate several), by `ID=` |
+| `--biotype_attribute` | `auto` | `gene_biotype` (NCBI), `biotype` (Ensembl) or `gene_type` (GENCODE), whichever genes carry; with none, protein-coding = has a CDS |
 | `--genes` | — | or a file of IDs, one per line (anything `unimap loci -g` accepts) |
 | `--upstream` / `--downstream` | `1500` / `1500` | strand-aware flanks |
-| `--read_lengths` | `60,150` | |
-| `--fragment_lengths` | `50,75,…,450,500` | bowtie2 `-X` is always set to the largest |
 | `--step` | `10` | bp between fragment starts |
 | `--orientation` | `plus` | `plus`, `minus` or `both` |
-| `--n_batches` | `40` | alignment batches per read length (capped at the region count) |
+| `--pairs_per_batch` | `35000000` | read pairs per alignment task (~1 h of bowtie2 on 16 cores); sets the number of batches |
+| `--n_batches` | — | or a fixed number of batches per read length (≤ 999, capped at the region count) |
 | `--bowtie2_args` | — | extra bowtie2 arguments; `--no-unal`, `-X`, threads, I/O are refused |
 | `--cutoffs` | `0,2,5,10,20,30` | fragment MAPQ cutoffs |
 | `--frag_mapq` / `--tolerance` | `min` / `0` | passed to `unimap score` |
@@ -78,15 +85,33 @@ with a newer default JDK, `export JAVA_HOME=$(/usr/libexec/java_home -v 24)`.
 | `--unimap_project` | `$UNIMAP_PROJECT` | UniMap.jl checkout; only without containers |
 | `--julia_threads` | task cpus | set `1` only to run the amd64 image under emulation (Apple Silicon), where multithreaded Julia segfaults |
 
-Genes are selected by `ID=`, not `Name=`: in GRCz12tu 23 protein-coding gene symbols occur
-more than once, and `unimap loci` skips ambiguous aliases. Every selected ID must become a
-locus or the run stops.
+### Which genes
+
+GFF3 has no standard biotype attribute, so `bin/select_genes.sh` looks at what the genes
+(root features with an `ID=` whose type contains `gene`) carry:
+
+| Annotation | Attribute | Gene IDs |
+|---|---|---|
+| NCBI RefSeq | `gene_biotype=protein_coding` | `gene-…` |
+| Ensembl | `biotype=protein_coding` | `gene:ENSG…` |
+| GENCODE | `gene_type=protein_coding` | `ENSG….N` |
+| none (MAKER, BRAKER, FlyBase-style, …) | — | a gene with a CDS (not `pseudo=true`, not a `pseudogene`) is protein-coding |
+
+`loci/gene_selection.tsv` records the rule that was used. Genes on sequences the FASTA
+doesn't have (alt haplotypes, patches, scaffolds left out of a primary-assembly FASTA) can't be
+simulated. They are listed in `loci/excluded_genes.tsv` with a warning. If that leaves no genes, the
+GFF and FASTA name their sequences differently (`chr1` vs `1` vs `NC_…`) and the run stops.
+Sequence names may not contain `|` (UniMap's read names are `|`-separated).
+
+Genes are selected by `ID=`, not `Name=`: symbols repeat (23 protein-coding symbols occur
+twice in zebrafish GRCz12tu), and `unimap loci` skips ambiguous aliases. Every selected ID
+must become a locus or the run stops.
 
 ## Output
 
 ```
 results/
-  loci/          gene_ids.txt, loci.tsv
+  loci/          gene_ids.txt, gene_selection.tsv, excluded_genes.tsv, loci.tsv
   simulation/    simulate.toml, loci.tsv, loci.bed, regions.tsv, tiling.tsv,
                  batch_plan.tsv (region -> batch), batches.tsv (pairs per batch)
   alignment/logs/sim_L{L}_{batch}.bowtie2.log
@@ -128,10 +153,18 @@ fragment that failed to map. So the pipeline counts:
 
 Select the **`seqera`** profile, not `aws`. Seqera's compute environment supplies the
 executor, queue, region, work directory, Wave and Fusion; `seqera` carries only cpus, memory
-and time. Recommended compute environment: Fusion + Wave, Spot, instance families with local
-NVMe (`c6id`, `m6id`, `r6id`). With Fusion, local disk holds only each task's own writes:
-~70 GB for `SIMULATE_AND_BATCH`, and `SCORE` only ~15 GB (Zarr store and tar; the shards stream from S3). Without Fusion every task
-downloads its inputs first, and `SCORE` needs ~125 GB of EBS — see `conf/aws.config`.
+and time, plus local scratch for two tasks (`conf/fusion_scratch.config`). Recommended
+compute environment: Fusion + Wave + fast instance storage, Spot, instance families with
+local NVMe (`c6id`, `m6id`, `r6id`).
+
+Under Fusion a task runs inside its S3 work directory, so every file it writes is an S3
+object. `SIMULATE_AND_BATCH` (49k per-region FASTQs) and `SCORE` (the ~450k-file Zarr store
+before it is tarred) therefore run in local scratch — the NVMe, mounted as the container's
+`/tmp` — and only their declared outputs go to S3: ~70 GB of local disk for
+`SIMULATE_AND_BATCH`, ~15 GB for `SCORE` (the shards stream from S3). Both log `df -h .` to
+`.command.err`. Without fast instance storage, scratch is a 100 GB boot disk, too small at
+genome scale. Without Fusion every task downloads its inputs first, and `SCORE` needs
+~125 GB of EBS — see `conf/aws.config`.
 
 Every input may be an `s3://` URI. `--outdir` on S3 publishes by server-side copy.
 
@@ -176,11 +209,25 @@ paralog, an N block, loci whose flanks merge into one region, a gene at a chromo
 two genes sharing a `Name=`, and a lncRNA and a pseudogene that must not be selected;
 `test/check_scores.jl expect` checks each comes out as it must.
 
-## Cost notes for the full zebrafish run
+## Scale
 
-28,407 genes → 12,256 regions; ~1.38 billion pairs per read length; ~1,000 vCPU-hours of
+The work is set by the read pairs, roughly per read length
+
+    pairs ≈ (bp of all regions) × (number of fragment lengths) × (2 if orientation=both) / step
+
+and the run log prints the actual count once `SIMULATE_AND_BATCH` is done. Alignment is
+sharded by `--pairs_per_batch`, so each `ALIGN_BATCH` task takes about the same time whatever
+the genome. Its memory is mostly the bowtie2 index (~2.5 GB per Gb of genome), so 28 GB
+covers genomes up to ~8 Gb. The serial steps do grow with the pair count:
+`SIMULATE_AND_BATCH` disk (~25 bytes per pair), and `SCORE` memory and time. The default
+resources were sized for the zebrafish run's ~2.8 billion pairs in all. For much more than that,
+raise them with a `-c` config (restate cpus, memory and time in each `withName` block).
+
+### The zebrafish run, for reference
+
+28,407 genes → 12,256 regions (1,060 Mb); ~1.38 billion pairs per read length; ~1,000 vCPU-hours of
 bowtie2. The wall time is two serial steps around a parallel one: `SIMULATE_AND_BATCH`
-(~20 min on 32 cores), 80 × `ALIGN_BATCH`, then `SCORE`. Measured components of `SCORE`,
+(~20 min on 32 cores), 80 × `ALIGN_BATCH` (40 batches × 2 read lengths), then `SCORE`. Measured components of `SCORE`,
 extrapolated to genome scale on an Apple M-series laptop: the shard scans and per-region
 tracks take a few minutes on 8 threads; writing the Zarr store takes ~12 min per read length
 and is serial (Zarr.jl's Blosc codec uses global state), so ~25–30 min in all. The store holds

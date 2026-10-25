@@ -99,7 +99,7 @@ for r in r1 r2 r3 r4 r5; do printf '%s\tchr1\t0\n' "${r}" >> regions.tsv; done
     done
 } > tiling.tsv
 
-"${BIN}/plan_batches.sh" regions.tsv tiling.tsv 2 plan.tsv batches.tsv 2> /dev/null
+"${BIN}/plan_batches.sh" regions.tsv tiling.tsv 2 0 plan.tsv batches.tsv 2> /dev/null
 assert_eq "planner exits cleanly"              "0" "$?"
 assert_eq "every region planned exactly once"  "r1 r2 r3 r4 r5" "$(tail -n +2 plan.tsv | cut -f1 | sort | tr '\n' ' ' | sed 's/ $//')"
 assert_eq "longest-first assignment"           "r1:001 r2:002 r3:002 r4:001 r5:002" \
@@ -115,13 +115,104 @@ for L in 30 50; do
         "$(awk -F'\t' -v L=${L} 'NR>1 && $1==L {s+=$4} END{print s}' batches.tsv)"
 done
 
-"${BIN}/plan_batches.sh" regions.tsv tiling.tsv 40 plan40.tsv batches40.tsv 2> /dev/null
+"${BIN}/plan_batches.sh" regions.tsv tiling.tsv 40 0 plan40.tsv batches40.tsv 2> /dev/null
 assert_eq "n_batches capped at the region count" "5" "$(tail -n +2 plan40.tsv | cut -f2 | sort -u | wc -l | tr -d ' ')"
 
+# By pair budget: the busiest L has 250 pairs.
+n_planned() { tail -n +2 "$1" | cut -f2 | sort -u | wc -l | tr -d ' '; }
+"${BIN}/plan_batches.sh" regions.tsv tiling.tsv 0 100 pa.tsv ba.tsv 2> /dev/null
+assert_eq "pairs_per_batch 100: ceil(250 / 100) = 3 batches" "3" "$(n_planned pa.tsv)"
+"${BIN}/plan_batches.sh" regions.tsv tiling.tsv 0 250 pa.tsv ba.tsv 2> /dev/null
+assert_eq "pairs_per_batch 250: exactly one batch's worth = 1" "1" "$(n_planned pa.tsv)"
+"${BIN}/plan_batches.sh" regions.tsv tiling.tsv 0 1 pa.tsv ba.tsv 2> /dev/null
+assert_eq "pairs_per_batch 1: capped at the region count" "5" "$(n_planned pa.tsv)"
+
 grep -v '^r3' tiling.tsv > tiling_missing.tsv
-"${BIN}/plan_batches.sh" regions.tsv tiling_missing.tsv 2 p.tsv b.tsv 2> err.txt
+"${BIN}/plan_batches.sh" regions.tsv tiling_missing.tsv 2 0 p.tsv b.tsv 2> err.txt
 rc=$?
 if [[ ${rc} -ne 0 ]]; then ok "region absent from tiling.tsv is an error"; else bad "region absent from tiling.tsv is an error"; fi
+cd "${ROOT}"
+
+# ---------------------------------------------------------------------------
+echo
+echo "select_genes.sh -- protein-coding genes from any GFF3"
+
+# The fixture's GFF is NCBI-style (gene_biotype=, ID=gene-...). Rewrite it in the
+# other conventions; each must give the same 7 protein-coding genes and leave
+# out the lncRNA and the pseudogene.
+G="${WORK}/genes"
+mkdir -p "${G}"
+cd "${G}"
+fixture_gff="${ROOT}/test/data/annotation.gff3"
+# A .fai (names and lengths are all select_genes.sh and unimap loci need of it
+# here, but make it a real one).
+cp "${ROOT}/test/data/genome.fa" genome.fa
+awk 'function out() { if (name != "") printf "%s\t%d\t%d\t%d\t%d\n", name, len, off, lb, lb + 1 }
+     /^>/ { out(); name = substr($1, 2); len = 0; lb = 0; pos += length($0) + 1; off = pos; next }
+     { if (lb == 0) lb = length($0); len += length($0); pos += length($0) + 1 }
+     END { out() }' genome.fa > genome.fa.fai
+
+cp "${fixture_gff}" ncbi.gff3
+# An embedded FASTA section ends the features: a gene after it is not one.
+printf '##FASTA\nchr1\tX\tgene\t1\t10\t.\t+\t.\tID=gene-bogus;gene_biotype=protein_coding\n' >> ncbi.gff3
+sed -e 's/ID=gene-/ID=gene:/; s/Parent=gene-/Parent=gene:/; s/gene_biotype=/biotype=/' "${fixture_gff}" > ensembl.gff3
+sed -e 's/gene_biotype=/gene_type=/' "${fixture_gff}" | gzip -c > gencode.gff3.gz
+# No biotype attribute at all: protein-coding genes are the ones with a CDS.
+# The pseudogene gets a CDS under a "pseudogene"-typed gene, the lncRNA a
+# pseudo=true CDS; neither may count. CRLF line endings, as some tools write.
+awk -F'\t' -v OFS='\t' '
+    $3 == "gene" && $9 ~ /gene_biotype=protein_coding/ { pc[substr($9, 4, index($9, ";") - 4)] = 1 }
+    $3 == "mRNA" { split($9, a, ";"); id = substr(a[1], 4); par = substr(a[2], 8); if (par in pc) cds[id] = 1 }
+    { line = $0; sub(/;gene_biotype=[^;]*/, "", line) }
+    $9 ~ /^ID=gene-pseudo1/ { sub(/\tgene\t/, "\tpseudogene\t", line) }
+    { print line }
+    $3 == "exon" { par = $9; sub(/.*Parent=/, "", par); sub(/;.*/, "", par)
+                   if (par in cds) { $3 = "CDS"; $9 = "Parent=" par; print } }
+    $9 ~ /^ID=gene-pseudo1/ { $3 = "CDS"; $9 = "ID=cds-p1;Parent=gene-pseudo1"; print }
+    $9 ~ /^ID=rna-lnc1\.1/  { $3 = "CDS"; $9 = "ID=cds-l1;Parent=rna-lnc1.1;pseudo=true"; print }
+' "${fixture_gff}" | awk '{ printf "%s\r\n", $0 }' > nobiotype.gff3
+
+expected_ids="dupA edgeD nblkF nearC revE sameG uniqB"
+ids_of() { sed -e 's/^gene[-:]//' "$1" | sort | tr '\n' ' ' | sed 's/ $//'; }
+for style in ncbi:ncbi.gff3:gene_biotype ensembl:ensembl.gff3:biotype gencode:gencode.gff3.gz:gene_type \
+             nobiotype:nobiotype.gff3:CDS; do
+    IFS=: read -r name gff rule <<< "${style}"
+    "${BIN}/select_genes.sh" "${gff}" genome.fa.fai protein_coding auto \
+        "${name}_ids.txt" "${name}_excl.tsv" "${name}_sel.tsv" 2> "${name}.err"
+    assert_eq "${name}: exits cleanly" "0" "$?"
+    assert_eq "${name}: the 7 protein-coding genes, no lncRNA/pseudogene" "${expected_ids}" "$(ids_of "${name}_ids.txt")"
+    assert_contains "${name}: rule recorded" "${rule}" "$(grep '^rule' "${name}_sel.tsv")"
+done
+assert_eq "ensembl: IDs kept as written (gene:...)" "gene:dupA" "$(head -n 1 ensembl_ids.txt)"
+
+"${BIN}/select_genes.sh" ncbi.gff3 genome.fa.fai protein_coding,lncRNA auto l.txt e.tsv s.tsv 2> /dev/null
+assert_eq "biotype list: protein_coding,lncRNA = 8" "8" "$(wc -l < l.txt | tr -d ' ')"
+
+grep -v '^chr3' genome.fa.fai > no_chr3.fai
+"${BIN}/select_genes.sh" ncbi.gff3 no_chr3.fai protein_coding auto m.txt m_excl.tsv m_sel.tsv 2> m.err
+assert_eq "genes on sequences not in the FASTA are left out" "dupA edgeD nearC revE uniqB" "$(ids_of m.txt)"
+assert_eq "and listed in excluded_genes.tsv" "gene-nblkF gene-sameG" "$(tail -n +2 m_excl.tsv | cut -f1 | sort | tr '\n' ' ' | sed 's/ $//')"
+assert_contains "and warned about" "2 selected gene(s) on 1 sequence(s) not in the FASTA" "$(cat m.err)"
+
+sed 's/^chr//' genome.fa.fai > renamed.fai
+out=$("${BIN}/select_genes.sh" ncbi.gff3 renamed.fai protein_coding auto x.txt x.tsv xs.tsv 2>&1); rc=$?
+assert_eq "GFF and FASTA naming sequences differently is an error" "1" "${rc}"
+assert_contains "that says so" "name sequences differently" "${out}"
+out=$("${BIN}/select_genes.sh" ncbi.gff3 genome.fa.fai protein-coding auto x.txt x.tsv xs.tsv 2>&1); rc=$?
+assert_eq "a biotype no gene has is an error" "1" "${rc}"
+assert_contains "that lists the values present" "lncRNA (1)" "${out}"
+out=$("${BIN}/select_genes.sh" nobiotype.gff3 genome.fa.fai lncRNA auto x.txt x.tsv xs.tsv 2>&1); rc=$?
+assert_eq "without a biotype attribute, only protein_coding can be selected" "1" "${rc}"
+out=$("${BIN}/select_genes.sh" ncbi.gff3 genome.fa.fai protein_coding gene_kind x.txt x.tsv xs.tsv 2>&1); rc=$?
+assert_eq "a named --biotype_attribute that no gene has is an error" "1" "${rc}"
+
+# The selected IDs must resolve in `unimap loci` -- the run stops otherwise.
+for name in ensembl nobiotype; do
+    gff=$(ls "${name}".gff3*)
+    julia --startup-file=no --project="${UNIMAP}" -m UniMap loci -f genome.fa -a "${gff}" \
+        -g "${name}_ids.txt" --upstream 500 --downstream 500 -o "${name}_loci.tsv" > "${name}_loci.log" 2>&1
+    assert_eq "${name}: unimap loci builds all 7 loci from those IDs" "7" "$(( $(wc -l < "${name}_loci.tsv" 2>/dev/null || echo 1) - 1 ))"
+done
 cd "${ROOT}"
 
 # ---------------------------------------------------------------------------
@@ -168,12 +259,25 @@ out=$(nf_launch --bowtie2_args '--very-sensitive --no-unal' -stub-run)
 assert_contains "--no-unal in --bowtie2_args is refused" "must not set --no-unal" "${out}"
 out=$(nf_launch --bowtie2_args '-X 300' -stub-run)
 assert_contains "-X in --bowtie2_args is refused (it is max F)" "must not set -X" "${out}"
+# Without the test profile there is no grid: it must be given.
+out=$(cd "${WORK}" && nextflow run "${ROOT}" -profile local --unimap_project "${UNIMAP}" -ansi-log false -stub-run \
+          --fasta "${ROOT}/test/data/genome.fa" --gff "${ROOT}/test/data/annotation.gff3" 2>&1)
+assert_contains "the grid is required" "missing required parameter(s): --read_lengths, --fragment_lengths" "${out}"
+out=$(nf_launch --read_lengths -stub-run)
+assert_contains "a bare --read_lengths is missing, not 'true'" "missing required parameter(s): --read_lengths" "${out}"
 out=$(nf_launch --fragment_lengths '50,abc' -stub-run)
 assert_contains "malformed --fragment_lengths is refused" "comma-separated list" "${out}"
 out=$(nf_launch --bowtie2_index /nonexistent/idx -stub-run)
 assert_contains "incomplete --bowtie2_index is refused" "no complete bowtie2 index" "${out}"
 out=$(cd "${WORK}" && nextflow run "${ROOT}" -profile test -ansi-log false -stub-run 2>&1)
 assert_contains "no container and no --unimap_project is refused" "--unimap_project" "${out}"
+# Under Fusion the work dir is S3; the two tasks that write throwaway files
+# must run in local scratch, without losing the profile's resource blocks.
+out=$(nextflow config "${ROOT}" -profile seqera -flat 2>&1)
+assert_contains "seqera: SIMULATE_AND_BATCH and SCORE use local scratch" \
+    "process.'withName:SIMULATE_AND_BATCH|SCORE'.scratch = true" "${out}"
+assert_contains "seqera: and keep their resources" \
+    "process.'withName:SIMULATE_AND_BATCH'.cpus = 32" "${out}"
 out=$(nf_launch -stub-run --outdir "${WORK}/stub")
 assert_contains "stub run wires every process" "> SCORE" "${out}"
 if [[ "${out}" == *"Done in"* ]]; then ok "stub run completes"; else bad "stub run completes"; printf '%s\n' "${out}" | tail -20; fi
@@ -191,12 +295,21 @@ if [[ ${E2E} -eq 1 ]]; then
     mkdir -p "${WORK}/index"
     bowtie2-build -q --seed 1 "${ROOT}/test/data/genome.fa" "${WORK}/index/genome" > /dev/null
 
-    out=$(nf_launch --bowtie2_index "${WORK}/index/genome" --outdir "${WORK}/nf" -w "${WORK}/work")
+    # With the scratch settings the seqera profile uses, so the unstaging they
+    # rely on (only declared outputs leave the task) is checked end to end.
+    out=$(nf_launch --bowtie2_index "${WORK}/index/genome" --outdir "${WORK}/nf" -w "${WORK}/work" \
+              -c "${ROOT}/conf/fusion_scratch.config")
     if [[ "${out}" == *"Done in"* ]]; then
         ok "pipeline completes"
     else
         bad "pipeline completes"; printf '%s\n' "${out}" | tail -30
     fi
+    # Each of the two logs the dir it ran in; neither may be under the work dir.
+    task_dirs=$(grep -h '^task dir: ' "${WORK}"/work/*/*/.command.err 2>/dev/null | sed 's/^task dir: //')
+    assert_eq "SIMULATE_AND_BATCH and SCORE logged their task dir" "2" \
+        "$(printf '%s\n' "${task_dirs}" | grep -c . || true)"
+    assert_eq "and ran in local scratch, not the work dir" "0" \
+        "$(printf '%s\n' "${task_dirs}" | grep -c "^${WORK}/work" || true)"
 
     # The monolithic reference: same loci, same grid, UniMap's own scripts.
     ref="${WORK}/ref"

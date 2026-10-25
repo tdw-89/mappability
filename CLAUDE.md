@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Nextflow (DSL2) pipeline that computes empirical paired-end mappability of genomic loci (default: every protein-coding gene in a GFF3) with [UniMap.jl](https://github.com/tdw-89/UniMap.jl). The design point is sharding the bowtie2 step — nearly all of the compute — across many independent tasks while producing results **bit-identical** to UniMap's own monolithic `simulate → align-script → score` path. UniMap.jl is expected as a sibling checkout at `../UniMap.jl` (see `mappability.code-workspace`).
+A Nextflow (DSL2) pipeline that computes empirical paired-end mappability of genomic loci (default: every protein-coding gene in a GFF3, from any genome and annotation source) with [UniMap.jl](https://github.com/tdw-89/UniMap.jl). The design point is sharding the bowtie2 step — nearly all of the compute — across many independent tasks while producing results **bit-identical** to UniMap's own monolithic `simulate → align-script → score` path. UniMap.jl is expected as a sibling checkout at `../UniMap.jl` (see `mappability.code-workspace`).
 
 ## Commands
 
@@ -38,7 +38,7 @@ BUILD_LOCI → SIMULATE_AND_BATCH ─┬─ fastq batches → ALIGN_BATCH × (n_
 ```
 (`SAMTOOLS_FAIDX` / `BOWTIE2_BUILD` run only when no `.fai` / `--bowtie2_index` is supplied.)
 
-- **SIMULATE_AND_BATCH** runs `unimap simulate`, then `bin/plan_batches.sh` packs regions into ≤ `n_batches` batches (greedy longest-first by pair count, deterministic). Per-region FASTQs are concatenated into `batch_L{L}_{batch}_R{1,2}.fq.gz` inside the task and never leave it (tens of thousands of small files would dominate an S3 work dir). `batches.tsv` records the pair count every batch must hold.
+- **SIMULATE_AND_BATCH** runs `unimap simulate`, then `bin/plan_batches.sh` packs regions into batches (greedy longest-first by pair count, deterministic). The batch count is `ceil(max pairs per L / pairs_per_batch)` unless `--n_batches` fixes it, capped at 999 and the region count. Per-region FASTQs are concatenated into `batch_L{L}_{batch}_R{1,2}.fq.gz` inside the task and never leave it (tens of thousands of small files would dominate an S3 work dir). `batches.tsv` records the pair count every batch must hold.
 - `main.nf` parses batch filenames into `[[L, batch], [R1, R2]]` and joins against `batches.tsv` with `failOnMismatch`/`failOnDuplicate`.
 - **ALIGN_BATCH** pipes bowtie2 straight into `samtools view -b`, writing `sim_L{L}_{batch}.bam`, and checks bowtie2's input pair count against the plan.
 - **SCORE** stages the shards into `sim/aln/` unconcatenated — `unimap score` reads `sim_L{L}_*.bam` as shards and scans them in parallel (needs UniMap with shard support; see `UNIMAP_REF`). It checks every planned shard arrived and all came from one bowtie2 build, writes `align.toml`, runs `unimap score`, then `bin/check_score.jl` verifies every simulated pair was scored exactly once, and finally tars the Zarr store.
@@ -51,7 +51,7 @@ A wrong answer here does not look like an error — a pair missing from a BAM is
 - **Never sort, filter, or `samtools merge` the BAMs.** `unimap score` streams pair by pair and needs every pair (including unaligned) present with mates adjacent. Shards are scored as they are; there is no need to concatenate them.
 - **`--no-unal`, `-X/--maxins`, threads, index, inputs/outputs are forbidden in `--bowtie2_args`** (`checkBowtie2Args`). `-X` is always set to the largest fragment length.
 - Sharding is exact only because bowtie2 seeds each pair from its own name/sequence/quality and every read name carries its origin region. Shard order doesn't matter; shard completeness does. Keep every count check (gene IDs → loci, FASTQs → batches, bowtie2 pairs → plan, shards → plan, pairs → score.toml).
-- Genes are selected by GFF3 `ID=`, not `Name=` (gene symbols repeat in GRCz12tu). Every selected ID must become a locus or the run stops.
+- Genes are selected by GFF3 `ID=`, not `Name=` (gene symbols repeat in GRCz12tu). Every selected ID must become a locus or the run stops. `bin/select_genes.sh` is the only place that knows annotation conventions (NCBI `gene_biotype`, Ensembl `biotype`, GENCODE `gene_type`, else CDS descent); its notion of a gene (root feature with `ID=`, type containing `gene`) must match `unimap loci`'s (`parse_gff3` in UniMap `src/loci.jl`). Genes on sequences missing from the FASTA are excluded and listed, never silently.
 - All processes run under `bash -euo pipefail` (`conf/base.config`); failures upstream of a pipe must not leave a short file.
 - Every process has a `stub:` block; keep them in sync when changing outputs so `-stub-run` keeps wiring every process.
 
@@ -60,7 +60,7 @@ A wrong answer here does not look like an error — a pair missing from a BAM is
 - `nextflow.config` holds params (documented inline) and includes `conf/base.config` (resources + retry policy: retry only on OOM/segfault/SIGTERM/Spot-reclaim exit codes, memory doubles per attempt).
 - Profiles: `local` (no containers, needs `--unimap_project`), `docker`/`apptainer` (engine only; combine with `local` or `test`), `test` (fixture + scaled grid), `unity` (Slurm + Apptainer), `aws` (direct AWS Batch, needs `--aws_queue`), `seqera`.
 - **A `withName` block in a profile replaces the one in `conf/base.config` rather than merging**, so profile blocks restate cpus, memory and time together.
-- **`seqera` must carry only resources** — no executor, queue, region, docker, wave, fusion or scratch settings; Seqera's compute environment injects those. Use `aws` only for launches outside Seqera.
+- **`seqera` must carry only resources** — no executor, queue, region, docker, wave or fusion settings; Seqera's compute environment injects those. Use `aws` only for launches outside Seqera. The one exception is `conf/fusion_scratch.config`, which it includes: under Fusion a task runs in its S3 work dir, so `SIMULATE_AND_BATCH` and `SCORE` (which write and then delete 49k FASTQs / a ~450k-file Zarr store) get `scratch = true`. A task that writes many throwaway files belongs in that selector too. The file uses its own `withName: 'A|B'` selector so it adds to the resource blocks instead of replacing them, and `run_tests.sh --e2e` runs with it.
 - AWS memory requests sit ~4–6% under nominal instance RAM (e.g. 15 GB, not 16) so they fit ECS-available memory.
 - Inputs may be `s3://` URIs; always resolve paths with `file()`, never by joining onto the launch dir.
 
@@ -72,7 +72,7 @@ A wrong answer here does not look like an error — a pair missing from a BAM is
 
 ### Test fixture
 
-`test/data` (~120 kb, from `test/make_fixture.py`) has planted features — a paralog, an N block, merging loci, a chromosome-edge gene, two genes sharing `Name=`, and a lncRNA and pseudogene that must not be selected. `test/check_scores.jl expect` asserts each one; `check_scores.jl equal` does the sharded-vs-monolithic comparison. If you change the fixture, update both.
+`test/data` (~120 kb, from `test/make_fixture.py`) has planted features — a paralog, an N block, merging loci, a chromosome-edge gene, two genes sharing `Name=`, and a lncRNA and pseudogene that must not be selected. `test/check_scores.jl expect` asserts each one; `check_scores.jl equal` does the sharded-vs-monolithic comparison. If you change the fixture, update both. `run_tests.sh` also rewrites the fixture GFF in Ensembl, GENCODE and biotype-free (CDS-only, CRLF) styles to test `select_genes.sh` and `unimap loci` against each.
 
 ## Other files
 

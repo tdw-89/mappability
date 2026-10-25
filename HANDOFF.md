@@ -22,10 +22,12 @@ BUILD_LOCI → SIMULATE_AND_BATCH ─┬─ batch FASTQs → ALIGN_BATCH × (bat
 | Item | State |
 |---|---|
 | UniMap.jl | `3959a74`, **pushed**: `unimap score` reads BAM shards `sim_L{L}_*.bam` in parallel; Blosc-threaded Zarr writes |
-| Image `ghcr.io/tdw-89/unimap:0.2.0` | Built locally (amd64), pins `3959a74`, passes `containers/check_containers.sh`. **Not pushed yet**: the user pushes it (`docker push ghcr.io/tdw-89/unimap:0.2.0`) |
+| Image `ghcr.io/tdw-89/unimap:0.2.0` | Pushed (amd64), pins `3959a74`, passes `containers/check_containers.sh` |
 | Image `ghcr.io/tdw-89/unimap:0.1.0` | Pushed; the old UniMap (`8db600a`), can't read shards. The pipeline no longer works with it |
-| mappability repo | Last commit `52d0c3f` (the user's). The `CAT_AND_SCORE` → `SCORE` refactor, the image bump to 0.2.0, `CLAUDE.md` and this file are **uncommitted** |
-| Tests | `test/run_tests.sh --docker`: 64 passed. UniMap `julia -t 4 --project test/runtests.jl`: 238 passed (also at `-t 1`) |
+| mappability repo | `SCORE` refactor and image bump committed (`4b0d86d`). The Fusion scratch fix (`conf/fusion_scratch.config`) is **uncommitted** |
+| Any genome | Done, uncommitted. `bin/select_genes.sh` picks protein-coding genes from NCBI (`gene_biotype`), Ensembl (`biotype`), GENCODE (`gene_type`) or biotype-free GFF3s (CDS descent), excludes and lists genes on sequences missing from the FASTA. `--read_lengths`/`--fragment_lengths` are **required** (no zebrafish defaults). Batches are sized by `--pairs_per_batch` (35M ≈ the old 40 for zebrafish); `--n_batches` still fixes the count. On GRCz12tu the new selector gives the identical 28,407 IDs |
+| Fusion scratch | Done. Under `-profile seqera`, `SIMULATE_AND_BATCH` and `SCORE` run with `scratch = true`, `stageOutMode = 'move'`; both log `task dir:` + `df -h .` to `.command.err`. Verified locally by `--e2e`, which now runs with that file; not yet seen on Seqera |
+| Tests | `test/run_tests.sh --e2e`: 83 passed (Fusion scratch, pair-budget batching, GFF styles). `--docker`: 64 passed before the scratch change. UniMap `julia -t 4 --project test/runtests.jl`: 238 passed (also at `-t 1`) |
 | Real data | Smoke run with 11 random genes, full production grid, `-profile local`: all 813,285 pairs per L scored, 5.5 min. Not yet re-run since the `SCORE` refactor (fixture e2e and a direct UniMap shard-vs-single comparison on those BAMs both match exactly) |
 | Seqera / Unity | Never run. The user has a Seqera CE (Fusion on, m5 family, Max CPUs 64) that is **unsuitable**; see below |
 
@@ -50,16 +52,9 @@ Reference data (read-only, the user's): `/Users/thomaswolfe/temp_for_analysis/fi
 
 ## Next steps, in order
 
-1. **Push the image and commit.** The user pushes `ghcr.io/tdw-89/unimap:0.2.0` and commits the mappability changes (ask first; they commit themselves).
-2. **Fix the Fusion scratch issue.** Not done yet; the user deferred it. Two steps write throwaway files into the S3-backed work dir:
-   - `SIMULATE_AND_BATCH`: `unimap simulate` writes 49,024 per-region FASTQs under `sim/fastq` before packing them.
-   - `SCORE`: `unimap score` writes the unpacked `mappability.zarr` (~450k chunk files) before the tar.
-
-   Proposed fix: set `scratch = true` for those two processes in `conf/seqera.config` (an explicit `scratch` is honored under Fusion). Only declared outputs then get copied to the work dir. Add a `df -h .` line to both scripts to confirm where scratch lands (container `/tmp` may sit on the boot EBS, not NVMe). If it lands on a small disk, use `scratch = '/some/nvme/path'` with a matching `aws.batch.volumes` mount.
-
-   Note `conf/seqera.config`'s comment says that profile must carry "no scratch settings". That rule was written to keep environment settings out; per-process scratch for these two is a pipeline need, so update the comment along with it.
-
-   A deeper alternative: add a UniMap `simulate --n-batches` option that writes batched FASTQs directly. That removes the 49k files and the 65 GB re-read/re-write entirely, but `align-script` would need to understand batches.
+1. ~~Push the image and commit.~~ Done.
+2. ~~Fix the Fusion scratch issue.~~ Done: `conf/fusion_scratch.config`, included by `conf/seqera.config`. Explicit `scratch` is honored under Fusion (`FusionScriptLauncher` only defaults a null `scratch` to false); `scratch = true` uses `mktemp -d` under `$TMPDIR`/`/tmp`. That `/tmp` is NVMe only with **fast instance storage**: Fusion caches in the container's `/tmp`, and Batch Forge mounts the formatted NVMe there. Seqera's docs don't state the container mount path outright, so on the first Seqera run, check the `task dir:` / `df` lines in both tasks' `.command.err`: the filesystem should be the NVMe (474 GB on m6id.2xlarge, 1.9 TB on c6id.8xlarge), not the ~100 GB boot disk. If it isn't, set `scratch = '<nvme path>'` instead.
+   - Still open, and optional: a UniMap `simulate --n-batches` option that writes batched FASTQs directly. It would remove the 49k files and the 65 GB re-read/re-write, but `align-script` would need to understand batches.
 3. **Create a new Seqera compute environment.** Don't reuse the user's m5 one: m5 has no NVMe, and Max CPUs 64 runs only 4 alignment tasks at a time (~10–13 h).
    - Batch Forge, in the S3 bucket's region.
    - Wave + Fusion v2 + **fast instance storage**.
@@ -68,6 +63,9 @@ Reference data (read-only, the user's): `/Users/thomaswolfe/temp_for_analysis/fi
    - Instance types `c6id`, `m6id` (optionally `r6id`).
    - Max CPUs 640–1280; check the account's EC2 Spot vCPU quota first.
    - Allocation strategy `SPOT_PRICE_CAPACITY_OPTIMIZED`.
+
+   Launching the zebrafish run now needs the grid spelled out:
+   `--read_lengths 60,150 --fragment_lengths 50,75,100,125,150,175,200,250,300,350,400,450,500`.
 
    Request fit:
 
@@ -84,6 +82,9 @@ Reference data (read-only, the user's): `/Users/thomaswolfe/temp_for_analysis/fi
 6. **Re-tune resources from real traces.** The SCORE memory (28–32 GB) is an estimate: fragment tables ~6 GB plus parallel per-region track buffers, which can reach ~1 GB each for >1 Mb regions.
 
 ## Gotchas already hit (don't rediscover them)
+
+- **`unimap loci` treats an exact gene ID that is also another gene's alias** (`Name`, `gene_id`, `locus_tag`, ...) as ambiguous and skips it; the count check then stops the run. Not seen in NCBI/Ensembl/GENCODE-style IDs, but possible in other GFF3s. The fix belongs in UniMap's `build_loci` (an exact `ann.genes` ID wins over aliases) and needs an image rebuild.
+- **Nextflow turns a bare `--param` (or `--param ''`) into `true`**; `validateParams` treats a Boolean as missing.
 
 - **Nextflow 25.04 needs Java 17–24**; the Mac defaults to 26: `export JAVA_HOME=$(/usr/libexec/java_home -v 24)`.
 - **Image base must be Debian trixie**, not bookworm: Julia's bundled zstd needs libzstd ≥ 1.5.7 to unpack the registry.

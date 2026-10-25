@@ -22,7 +22,10 @@
  *
  * Disk: only what this task writes -- the Zarr store and its tar, ~7 GB each at
  * genome scale. Under Fusion the shards are read straight from S3; without it
- * (plain AWS Batch) they are downloaded first, ~110 GB.
+ * (plain AWS Batch) they are downloaded first, ~110 GB. The unpacked store is
+ * ~450k chunk files, so under Fusion conf/fusion_scratch.config runs this task
+ * in local scratch and only the tar goes to S3; the `df` line in .command.err
+ * shows where.
  */
 
 process SCORE {
@@ -55,6 +58,10 @@ process SCORE {
     """
     ${project}
     export UNIMAP_THREADS=${params.julia_threads ?: task.cpus}
+
+    # Where the Zarr store will land (local scratch, not S3, under Fusion).
+    echo "task dir: \${PWD}" >&2
+    df -h . >&2 || true
 
     # ---- every planned shard is here --------------------------------------
     missing=0

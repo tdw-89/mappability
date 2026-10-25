@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 #
-# plan_batches.sh <regions.tsv> <tiling.tsv> <n_batches> <plan.tsv> <batches.tsv>
+# plan_batches.sh <regions.tsv> <tiling.tsv> <n_batches> <pairs_per_batch> <plan.tsv> <batches.tsv>
 #
-# Pack simulation regions into at most n_batches batches of near-equal read-pair
-# count (greedy longest-first: biggest region to the lightest batch). Each batch
-# becomes one ALIGN_BATCH task per read length, so the balance is what sets the
-# wall time of the alignment step.
+# Pack simulation regions into batches of near-equal read-pair count (greedy
+# longest-first: biggest region to the lightest batch). Each batch becomes one
+# ALIGN_BATCH task per read length, so the balance is what sets the wall time of
+# the alignment step.
+#
+# How many batches: n_batches if it is > 0; otherwise just enough that the
+# read length with the most pairs averages at most pairs_per_batch per batch,
+# so task length stays the same whatever the genome and grid. Either way capped
+# at 999 (batch IDs are three digits) and at the number of regions -- a region
+# is never split, so one larger than pairs_per_batch makes a larger batch.
 #
 # Round-robin by region would balance the number of regions, not the work:
 # regions run from a few kb to over a Mb, so a round-robin batch can carry
@@ -23,7 +29,7 @@
 set -euo pipefail
 export LC_ALL=C
 
-regions=$1 tiling=$2 n_batches=$3 plan=$4 manifest=$5
+regions=$1 tiling=$2 n_batches=$3 pairs_per_batch=$4 plan=$5 manifest=$6
 
 # region_id <tab> total pairs (all L) <tab> position in regions.tsv
 awk -F'\t' '
@@ -42,7 +48,21 @@ if [[ "${n_regions}" -eq 0 ]]; then
     echo "error: no regions in ${regions}" >&2
     exit 1
 fi
-B=$(( n_batches < n_regions ? n_batches : n_regions ))
+if [[ "${n_batches}" -gt 0 ]]; then
+    B=${n_batches}
+else
+    # The busiest read length's pairs, over the budget, rounded up.
+    B=$(awk -F'\t' -v ppb="${pairs_per_batch}" '
+        FNR == 1 { for (i = 1; i <= NF; i++) col[$i] = i; next }
+        { per_L[$col["L"]] += $col["n_pairs"] }
+        END {
+            m = 0; for (L in per_L) if (per_L[L] > m) m = per_L[L]
+            b = int(m / ppb); if (b * ppb < m) b++
+            print (b < 1 ? 1 : b)
+        }' "${tiling}")
+fi
+B=$(( B < 999 ? B : 999 ))
+B=$(( B < n_regions ? B : n_regions ))
 
 # Largest first, ties by regions.tsv order, so the plan is deterministic.
 sort -t $'\t' -k2,2nr -k3,3n region_sizes.tsv \
